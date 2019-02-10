@@ -8,9 +8,18 @@ from pyspark import sql
 from collections import namedtuple
 
 
+def store_data(rdd):
+    if len(rdd.collect())>0:
+        rdd.toDF().write.format("com.mongodb.spark.sql").mode("overwrite").save()
+
+def store_bucket_data(time, rdd):
+    if len(rdd.collect())>0:
+        Timeline = namedtuple("Timeline", ("time", "word", "count"))
+        newrdd = rdd.map(lambda rec: Timeline(time, rec[0], rec[1]) )
+        newrdd.toDF().write.format("com.mongodb.spark.sql").mode("overwrite").save()
+
 if __name__ == "__main__":
 
-    print("HELLO")
     # create a spark context
     sc = SparkContext(appName="NetworkWordCount")
 
@@ -23,32 +32,23 @@ if __name__ == "__main__":
     # open a socket stream to read incoming text
     socket_stream = ssc.socketTextStream("127.0.0.1", 3999)
 
-    # create reading window for every 30 seconds
-    lines = socket_stream.window( 30 )
+    # create reading interval window
+    lines = socket_stream.window( 10 )
 
     # set namedtuple for found words and their count
     fields = ("word", "count" )
     WordCount = namedtuple( 'WordCount', fields )
 
-    # collect all per 30 second rdd
+    #
+    words = lines.flatMap(lambda line: line.split(" "))
+    wordCounts = words.map(lambda word: (word.lower().strip(), 1)).reduceByKey(lambda x, y: x + y)
+    wordCountsFiltered = wordCounts.filter(lambda rec: len(rec[0]) > 3)
+    wordCountsTuppled = wordCountsFiltered.map(lambda rec: WordCount(rec[0], rec[1]) )
 
-    rdds = (lines.flatMap( lambda text: text.split( " " ) )
-      .map( lambda word: ( word.lower(), 1 ) )
-      .reduceByKey( lambda a, b: a + b )
-      .map( lambda rec: WordCount(rec[0], rec[1]) )
-      #.filter(lambda rec: len(rec) > 3 )
-      )
+    # store data into MongoDB
+    wordCountsTuppled.foreachRDD(store_bucket_data)
 
-
-    # for each defined RDD store the results in MongoDB
-    rdds.foreachRDD(
-        lambda rdd: rdd.toDF()
-            .write.format("com.mongodb.spark.sql")
-            .mode("overwrite")
-            .save()
-    )
-
-
+    # start context and set timeout value
     ssc.start()
     ssc.awaitTerminationOrTimeout(10)
     ssc.stop()
